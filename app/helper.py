@@ -92,7 +92,7 @@ def create_telegram_app():
 
 user_cache = LRUCache(maxsize=128)
 
-def get_formatted_messages(table, user_id, num_msgs=20):
+def get_formatted_messages(table, user_id, num_msgs=50):
     try:
         # Get user item from DynamoDB
         # if user_id in user_cache:
