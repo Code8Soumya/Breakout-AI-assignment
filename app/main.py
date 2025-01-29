@@ -1,23 +1,16 @@
 import logging
-import os
+from io import BytesIO
+import base64
+from langchain_core.messages import HumanMessage
 from telegram import Update
-from telegram.ext import filters, MessageHandler, ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import filters, MessageHandler, CommandHandler, ContextTypes
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
-from helper import get_dynamodb_table, check_user_exists, save_chat_in_user_table, create_telegram_app
+from helper import get_dynamodb_table, check_user_exists, save_chat_in_user_table, create_telegram_app, save_and_cache_messages, setup_logging
+from agents import initialize_llm, search_crew
 
-
-# Set up logging
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.DEBUG,  # Change to DEBUG for more detailed logs
-    handlers=[
-        logging.FileHandler("logs/bot.log"),  # Save logs to 'bot.log'
-        logging.StreamHandler()  # Continue showing logs in the console
-    ]
-)
-logger = logging.getLogger(__name__)
-
+logger = setup_logging()
 table = get_dynamodb_table()
+llm = initialize_llm()
 
 # Define the start command handler
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -77,62 +70,167 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error handling contact: {e}")
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="An error occurred while saving your phone number."
+            text="An error occurred while saving your phone number.",
         )
 # Define the echo handler
-async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = update.effective_user.id
-        user_message = update.message.text
-        # phone_number = update.effective_user.contact.phone_number if update.effective_user.contact else None
-        first_name = update.effective_user.first_name
-        username = update.effective_user.username
-        logger.info(f"Received message from user {user_id}: {user_message}")
+        if check_user_exists(table, user_id) == False:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="Please use /start to proceed and share your contact info.",
+                reply_markup=ReplyKeyboardRemove(),
+            )
+            return
         
-        # Save user message
-        save_chat_in_user_table(
+        user_message = update.message.text
+        context_msgs = save_and_cache_messages(
             table=table,
             user_id=user_id,
-            # phone_number=99,
-            # first_name=first_name, 
-            # user_name=username,
-            message=('user', user_message),
-            message_type='text'
+            msg=user_message,
+            msg_type='text',
+            role='human',
         )
-        
+
+        llm_response = llm.invoke(context_msgs).content
+    
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text=user_message
+            text=llm_response,
         )
-        
-        # Save bot response
-        save_chat_in_user_table(
+        save_and_cache_messages(
             table=table,
             user_id=user_id,
-            # phone_number=99,
-            # first_name=first_name,
-            # user_name=username, 
-            message=('bot', user_message),
-            message_type='text'
+            msg=llm_response,
+            msg_type='text',
+            role='assistant',
         )
         
     except Exception as e:
         logger.error(f"Error in echo handler: {e}")
         await context.bot.send_message(
-            chat_id=update.effective_chat.id, 
-            text="Sorry, something went wrong. Please try again later."
+            chat_id=update.effective_chat.id,
+            text="Sorry, something went wrong. Please try again later.",
+        )
+        
+async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user_id = update.effective_user.id
+        if check_user_exists(table, user_id) == False:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="Please use /start to proceed and share your contact info.",
+                reply_markup=ReplyKeyboardRemove(),
+            )
+            return
+
+        save_and_cache_messages(
+            table=table,
+            user_id=user_id,
+            msg='a image',
+            msg_type='image',
+            role='human',
+        )
+
+        photo_file = await update.message.photo[-1].get_file()
+        photo_bytes = await photo_file.download_as_bytearray()
+        photo = base64.b64encode(photo_bytes).decode("utf-8")
+        
+        message = HumanMessage(
+            content = [
+                {"type": "text", "text": "Describe the content of this image"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{photo}"},
+                },
+            ]
+        )
+        
+        llm_response = llm.invoke([message]).content
+                
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=llm_response,
+        )
+        
+        save_and_cache_messages(
+            table=table,
+            user_id=user_id,
+            msg=llm_response,
+            msg_type='text',
+            role='assistant',
+        )
+
+    except Exception as e:
+        logger.error(f"Error in echo handler: {e}")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="Sorry, something went wrong. Please try again later.",
         )
         
         
+async def web_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle web search command and query"""
+    try:
+        user_id = update.effective_user.id
+        if check_user_exists(table, user_id) == False:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="Please use /start to proceed and share your contact info.",
+                reply_markup=ReplyKeyboardRemove(),
+            )
+            return
+
+        if not context.args:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="Please provide a search query after /web_search command"
+            )
+            return
+
+        search_query = ' '.join(context.args)
+        
+        save_and_cache_messages(
+            table=table,
+            user_id=user_id,
+            msg=search_query,
+            msg_type='web search query',
+            role='human',
+        )
+
+        search_result = search_crew.kickoff(inputs={'topic': search_query})
+
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=search_result
+        )
+
+        save_and_cache_messages(
+            table=table,
+            user_id=user_id,
+            msg=search_result,
+            msg_type='web search result', 
+            role='assistant',
+        )
+
+    except Exception as e:
+        logger.error(f"Error in web search handler: {e}")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="Sorry, something went wrong with the web search. Please try again later."
+        )
+        
 if __name__ == '__main__':
-    # Initialize the application
     application = create_telegram_app()
     
     application.add_handler(CommandHandler('start', start))
+    application.add_handler(CommandHandler('search', web_search))
     application.add_handler(MessageHandler(filters.CONTACT, handle_contact))
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), echo))
-    
-    # Log startup information
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), msg_handler))
+    application.add_handler(MessageHandler(filters.PHOTO & (~filters.COMMAND), photo_handler))
+    # application.add_handler(MessageHandler(filters.Document.ALL & (~filters.COMMAND), document_handler))
+            
     logger.info("Bot is starting...")
     application.run_polling()
 
