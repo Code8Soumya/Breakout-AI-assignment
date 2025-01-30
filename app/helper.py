@@ -1,3 +1,4 @@
+# Import required libraries
 from datetime import datetime
 from telegram.ext import ApplicationBuilder
 from cachetools import LRUCache
@@ -7,9 +8,15 @@ import boto3
 import logging
 import os
 from dotenv import load_dotenv
+
+# Load environment variables
 load_dotenv()
 
 def setup_logging():
+    """
+    Sets up logging configuration with file handler
+    Returns logger instance
+    """
     try:
         os.makedirs("logs", exist_ok=True)
         logging.basicConfig(
@@ -24,17 +31,21 @@ def setup_logging():
     except Exception as e:
         print(f"Error setting up logging: {str(e)}")
 
-
+# Initialize logger
 logger = setup_logging()
 
 def get_dynamodb_table():
+    """
+    Creates DynamoDB resource and returns table instance
+    Returns None if error occurs
+    """
     try:
         load_dotenv()
         dynamodb = boto3.resource(
             'dynamodb',
-            region_name = 'ap-south-1',  # Replace with your desired region
-            aws_access_key_id = os.getenv('AWS_ACCESS_KEY_ID'),  # Optional if using ~/.aws/credentials
-            aws_secret_access_key = os.getenv('AWS_SECRET_ACCESS_KEY'),  # Optional if using ~/.aws/credentials
+            region_name = 'ap-south-1',
+            aws_access_key_id = os.getenv('AWS_ACCESS_KEY_ID'),
+            aws_secret_access_key = os.getenv('AWS_SECRET_ACCESS_KEY'),
         )
         table = dynamodb.Table('telebot_users')
         return table
@@ -43,6 +54,10 @@ def get_dynamodb_table():
         return None    
 
 def check_user_exists(table, user_id):
+    """
+    Checks if user exists in DynamoDB table
+    Returns boolean indicating if user exists
+    """
     try:
         response = table.get_item(
             Key={
@@ -55,6 +70,10 @@ def check_user_exists(table, user_id):
         return False 
 
 def save_chat_in_user_table(table, user_id, message, phone_number='', first_name='', user_name='', message_type = 'text'):
+    """
+    Saves chat message and user details in DynamoDB table
+    Updates existing user or creates new user entry
+    """
     try:
         table.update_item(
             Key={'user_id': user_id},
@@ -82,6 +101,10 @@ def save_chat_in_user_table(table, user_id, message, phone_number='', first_name
         logger.error(f"Error occurred in app/helper.py in save_chat_in_user_table: {str(e)}")
 
 def create_telegram_app():
+    """
+    Creates and returns Telegram application instance
+    Returns None if error occurs
+    """
     try:
         load_dotenv()
         application = ApplicationBuilder().token(os.getenv("telebot_token")).build()
@@ -90,25 +113,27 @@ def create_telegram_app():
         logger.error(f"Error occurred in app/helper.py in create_telegram_app: {str(e)}")
         return None       
 
+# Initialize LRU cache for storing user messages
 user_cache = LRUCache(maxsize=128)
 
 def get_formatted_messages(table, user_id, num_msgs=50):
+    """
+    Retrieves and formats chat messages for a user from DynamoDB
+    Returns list of (role, message) tuples
+    Caches results in user_cache
+    """
     try:
-        # Get user item from DynamoDB
-        # if user_id in user_cache:
-        #     return user_cache[user_id]
-        
         response = table.get_item(
             Key={
                 'user_id': user_id
             }
         )
         
-        # Check if user exists and has chat history
+        # Return empty list if user or chat history doesn't exist
         if 'Item' not in response or 'chats' not in response['Item']:
             return []
             
-        # Get chat history
+        # Get recent chat history
         chats = response['Item']['chats']
         recent_chats = chats[-num_msgs:] if len(chats) > num_msgs else chats
         
@@ -125,8 +150,11 @@ def get_formatted_messages(table, user_id, num_msgs=50):
         logger.error(f"Error occurred in app/helper.py in get_formatted_messages: {str(e)}")
         return []
 
-
 def save_and_cache_messages(table, user_id, msg, msg_type, role):
+    """
+    Saves message to DynamoDB and updates cache
+    Returns updated cached messages for user
+    """
     try:
         save_chat_in_user_table(
             table=table,
@@ -151,10 +179,14 @@ def save_and_cache_messages(table, user_id, msg, msg_type, role):
         return []    
 
 class TavilySearchTool:
+    """Tool for performing internet searches using Tavily API"""
+    
     @tool('Search Internet')
     def search_internet(query: str) -> str:
-        """This tool accepts only one parameter named 'query' and is
-        useful to search the internet about a given query and return relevant results."""
+        """
+        Searches internet for given query using Tavily search
+        Returns formatted string of search results
+        """
         try:
             tavily_tool = TavilySearchResults(
                 max_results = 5,
