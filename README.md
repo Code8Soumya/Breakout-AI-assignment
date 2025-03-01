@@ -25,5 +25,3 @@ This project implements a Telegram bot that leverages the power of Google Gemini
     * **AWS DynamoDB:**  Used as a NoSQL database to store user data and conversation history.
     * **Google Generative AI:** The large language model powering the conversational AI.
     * **Tavily:**  The search API used for the web search functionality.
-
-My Resume Link : https://drive.google.com/file/d/16p4-QR3ZUNH926Q1TpAdCuMeH23BF1NE/view?usp=sharing
